@@ -1,0 +1,7 @@
+latitude = 0.0  # The latitude of the location, in degrees.
+longitude = 0.0  # The longitude of the location, in degrees
+accuracy = 0.0  # The accuracy of the location fix, in meters
+altitude = 0.0  # The altitude of the location fix, in meters. When unknown, its set to minimum double value, -1.7976931348623157e+308
+speed = -1.0  # The speed in meters per second. When unknown, it's set to -1.0.
+heading = -1.0  # The heading direction in degrees with respect to North direction, in clockwise order. That means North becomes 0 degree, East: 90 degrees, South: 180 degrees, West: 270 degrees and so on. When unknown, it's set to -1.0.
+timestamp = 0  # The timestamp when the location was determined, in seconds since the Epoch.

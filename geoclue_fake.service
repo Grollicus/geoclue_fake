@@ -1,0 +1,7 @@
+[Unit]
+Description=Geoclue Service Faker
+
+[Service]
+Type=dbus
+ExecStart=/usr/bin/geoclue_fake
+BusName=org.freedesktop.GeoClue2
