@@ -138,7 +138,7 @@ client_addr = manager.GetClient()
 print('Geoclue client path %r' % (client_addr,))
 
 client = bus.get('org.freedesktop.GeoClue2', client_addr)
-print(client.Introspect())
+# print(client.Introspect())
 
 print('client GetAll', repr(client.GetAll('org.freedesktop.GeoClue2.Client')))
 client.Set('org.freedesktop.GeoClue2.Client', 'DesktopId', Variant('s', 'w00t'))
@@ -147,7 +147,7 @@ client.Set('org.freedesktop.GeoClue2.Client', 'DistanceThreshold', Variant('u', 
 
 def location_signal(sender, object, iface, signal, params):
     # print('location_signal', repr((sender, object, iface, signal, params)))
-    print('yo', bus.get('.GeoClue2', params[1]).Introspect())
+    # print('yo', bus.get('.GeoClue2', params[1]).Introspect())
     location = bus.get('.GeoClue2', params[1]).GetAll("org.freedesktop.GeoClue2.Location")
     print('Location', repr(location))
 
