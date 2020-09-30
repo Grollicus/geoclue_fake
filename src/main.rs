@@ -22,8 +22,10 @@ extern crate toml;
 #[macro_use]
 extern crate lazy_static;
 
-use dbus::{Connection, tree};
-use std::sync::{Arc, Mutex};
+use dbus::strings::Path;
+use dbus::blocking::Connection;
+use dbus_crossroads::{Context, Crossroads, IfaceToken, MethodErr};
+use std::sync::Mutex;
 use std::io::Read;
 
 
@@ -53,7 +55,7 @@ impl From<toml::de::Error> for Error {
     }
 }
 
-#[derive(serde::Deserialize, Default, Clone, Copy, Debug)]
+#[derive(serde::Deserialize, Default, Clone, Debug)]
 struct LocationData {
     latitude: f64,
     longitude: f64,
@@ -61,136 +63,121 @@ struct LocationData {
     altitude: f64,
     speed: f64,
     heading: f64,
+    #[serde(default="String::new")]
+    description: String,
     timestamp: u64,
 }
 
-#[derive(Debug)]
-struct Client {
-    desktop_id: String,
-    distance_threshold: u32,
-}
-
-#[derive(Copy, Clone, Default, Debug)]
-struct TData;
-impl tree::DataType for TData {
-    type Tree = ();
-    type ObjectPath = Option<usize>;
-    type Property = ();
-    type Interface = ();
-    type Method = ();
-    type Signal = ();
-}
-
-fn create_client(clientno: usize, tree: &mut dbus::tree::Tree<dbus::tree::MTFnMut<TData>, TData>, conn: &mut Connection) {
-    let f = tree::Factory::new_fnmut::<TData>();
-
-    let location_updated = Arc::new(f.signal("LocationUpdated", ()).sarg::<dbus::Path,_>("old").sarg::<dbus::Path,_>("new"));
-    let location_updated_clone = location_updated.clone();
-
-    let path = f.object_path(format!("/org/freedesktop/GeoClue2/Client/{}", clientno), Some(clientno)).introspectable().add(
-        f.interface("org.freedesktop.GeoClue2.Client", ())
-            .add_m(f.method("Start", (), move |m| {
-                let clientno = m.path.get_data().unwrap();
-                let sig = location_updated.msg(m.path.get_name(), m.iface.get_name()).append2::<dbus::Path, dbus::Path>(
-                    dbus::Path::new("/").unwrap(),
-                    dbus::Path::new(format!("/org/freedesktop/GeoClue2/Client/{}/Location/0", clientno)).unwrap()
-                );
-                return Ok(vec!(m.msg.method_return(), sig));
-            }))
-            .add_m(f.method("Stop", (), |m| { Ok(vec!(m.msg.method_return())) }))
-            .add_s(location_updated_clone)
-            .add_p(f.property::<&str, _>("DesktopId", ()).access(tree::Access::ReadWrite)
-                .on_set(|i, m| {
-                    let clientno = m.path.get_data().unwrap();
-                    let new_desktop_id = i.read::<&str>()?;
-                    {
-                        let mut clients = CLIENTS.lock().unwrap();
-                        let client: &mut Client = clients.get_mut(clientno).unwrap();
-                        client.desktop_id.truncate(0);
-                        client.desktop_id.push_str(new_desktop_id);
-                    }
-                    Ok(())
-                }).on_get(|i, m| {
-                    let clientno = m.path.get_data().unwrap();
-                    i.append(CLIENTS.lock().unwrap()[clientno].desktop_id.as_str());
-                    Ok(())
-            }))
-            .add_p(f.property::<u32, _>("DistanceThreshold", ()).access(tree::Access::ReadWrite)
-                .on_set(|i, m| {
-                    let clientno = m.path.get_data().unwrap();
-                    let new_distance_threshold = i.read::<u32>()?;
-                    {
-                        let mut clients = CLIENTS.lock().unwrap();
-                        let client: &mut Client = clients.get_mut(clientno).unwrap();
-                        client.distance_threshold = new_distance_threshold;
-                    }
-                    Ok(())
-                }).on_get(|i, m| {
-                    let clientno = m.path.get_data().unwrap();
-                    i.append(CLIENTS.lock().unwrap()[clientno].distance_threshold);
-                    Ok(())
-            }))
-        );
-    tree.insert(path);
-    conn.register_object_path(format!("/org/freedesktop/GeoClue2/Client/{}", clientno).as_str()).unwrap();
-}
-
-fn create_location(clientno: usize, tree: &mut dbus::tree::Tree<dbus::tree::MTFnMut<TData>, TData>, conn: &mut Connection) {
-    let f = tree::Factory::new_fnmut::<TData>();
-
-    let path = f.object_path(format!("/org/freedesktop/GeoClue2/Client/{}/Location/0", clientno), Some(clientno)).introspectable().add(
-        f.interface("org.freedesktop.GeoClue2.Location", ())
-            .add_p(f.property::<f64, _>("Latitude", ()).access(tree::Access::Read).on_get(move |i, m| {
-                i.append(LOCATION_DATA.lock().unwrap().latitude);
-                let clientno = m.path.get_data().unwrap();
-                println!("Latitude queried by #{}: '{}'", clientno, CLIENTS.lock().unwrap()[clientno].desktop_id.as_str());
-                Ok(())
-            }))
-            .add_p(f.property::<f64, _>("Longitude", ()).access(tree::Access::Read).on_get(move |i, _m| {
-                i.append(LOCATION_DATA.lock().unwrap().longitude);
-                Ok(())
-            }))
-            .add_p(f.property::<f64, _>("Accuracy", ()).access(tree::Access::Read).on_get(move |i, _m| {
-                i.append(LOCATION_DATA.lock().unwrap().accuracy);
-                Ok(())
-            }))
-            .add_p(f.property::<f64, _>("Altitude", ()).access(tree::Access::Read).on_get(move |i, _m| {
-                i.append(LOCATION_DATA.lock().unwrap().altitude);
-                Ok(())
-            }))
-            .add_p(f.property::<f64, _>("Speed", ()).access(tree::Access::Read).on_get(move |i, _m| {
-                i.append(LOCATION_DATA.lock().unwrap().speed);
-                Ok(())
-            }))
-            .add_p(f.property::<f64, _>("Heading", ()).access(tree::Access::Read).on_get(move |i, _m| {
-                i.append(LOCATION_DATA.lock().unwrap().heading);
-                Ok(())
-            }))
-            .add_p(f.property::<(u64, u64), _>("Timestamp", ()).access(tree::Access::Read).on_get(move |i, _m| {
-                i.append::<(u64, u64)>((LOCATION_DATA.lock().unwrap().timestamp, 0));
-                Ok(())
-            }))
-    );
-
-    tree.insert(path);
-    conn.register_object_path(format!("/org/freedesktop/GeoClue2/Client/{}/Location/0", clientno).as_str()).unwrap();
-}
-
-fn add_client(clients: &mut Vec<Client>, mut tree: &mut dbus::tree::Tree<dbus::tree::MTFnMut<TData>, TData>, mut conn: &mut Connection) -> usize {
-    let clientno = clients.len();
-
-    clients.push(Client{desktop_id: String::new(), distance_threshold: 10000});
-    create_client(clientno, &mut tree, &mut conn);
-    create_location(clientno, &mut tree, &mut conn);
-
-    return clientno
-}
-
-
 // TODO make CLIENTS a dictionary
 lazy_static! {
-    static ref LOCATION_DATA : Mutex<LocationData> = {Mutex::new(LocationData::default())};
-    static ref CLIENTS: Mutex<Vec<Client>> = {Mutex::new(vec![])};
+    static ref LOCATION_DATA : Mutex<LocationData> = Mutex::new(LocationData::default());
+}
+
+struct ManagerState {
+    next_id: u32
+}
+
+#[derive(Default)]
+struct ClientState {
+    client_id: u32,
+    sender: String,
+    distance_threshold: u32,
+    time_threshold: u32, // not supported
+    desktop_id: String,
+    requested_accuracy_level: u32, // not supported
+    active: bool,
+}
+
+fn lookup_client_state<'l>(cr: &'l mut Crossroads, path: &Path<'l>) -> Result<&'l mut ClientState, MethodErr> {
+    let path_suffix = path.strip_prefix("/org/freedesktop/GeoClue2/Client/").ok_or_else(|| MethodErr::failed(""))?;
+    let mut suffix_iterator = path_suffix.split_terminator("/");
+    let client_id = suffix_iterator.next().unwrap();
+    if suffix_iterator.next().is_none() {
+        return Err(MethodErr::failed(""));
+    }
+    let client_id: u32 = client_id.parse().map_err(|_| MethodErr::failed(""))?;
+    let client_path = format!("/org/freedesktop/GeoClue2/Client/{}", client_id);
+    return cr.data_mut(&client_path.into()).ok_or_else(|| MethodErr::failed(""));
+}
+
+fn create_location(cr: &mut Crossroads) -> IfaceToken<()> {
+    cr.register("org.freedesktop.GeoClue2.Location", |b| {
+        b.property("Latitude")
+            .get_with_cr(|ctx, cr: &mut Crossroads| {
+                let client_state = lookup_client_state(cr, ctx.path())?;
+                println!("Latitude queried by #{}: '{}'", client_state.client_id, client_state.desktop_id);
+                LOCATION_DATA.lock().map_or_else(|_| Err(MethodErr::failed("Could not get Location data")), |l| Ok(l.latitude))
+            });
+        b.property("Longitude").get(|_ctx, _| LOCATION_DATA.lock().map_or_else(|_| Err(MethodErr::failed("Could not get Location data")), |l| Ok(l.longitude)));
+        b.property("Accuracy").get(|_ctx, _| LOCATION_DATA.lock().map_or_else(|_| Err(MethodErr::failed("Could not get Location data")), |l| Ok(l.accuracy)));
+        b.property("Altitude").get(|_ctx, _| LOCATION_DATA.lock().map_or_else(|_| Err(MethodErr::failed("Could not get Location data")), |l| Ok(l.altitude)));
+        b.property("Speed").get(|_ctx, _| LOCATION_DATA.lock().map_or_else(|_| Err(MethodErr::failed("Could not get Location data")), |l| Ok(l.speed)));
+        b.property("Heading").get(|_ctx, _| LOCATION_DATA.lock().map_or_else(|_| Err(MethodErr::failed("Could not get Location data")), |l| Ok(l.heading)));
+        b.property("Description").get(|_ctx, _| LOCATION_DATA.lock().map_or_else(|_| Err(MethodErr::failed("Could not get Location data")), |l| Ok(l.description.clone())));
+        b.property("Timestamp").get(|_ctx, _| LOCATION_DATA.lock().map_or_else(|_| Err(MethodErr::failed("Could not get Location data")), |l| Ok(l.timestamp)));
+    })
+}
+
+fn create_client_token(cr: &mut Crossroads) -> IfaceToken<ClientState> {
+    cr.register("org.freedesktop.GeoClue2.Client", |b| {
+        b.property("Location").get(|_ctx, client_state: &mut ClientState| {
+            if client_state.active {
+                Ok(Path::from(format!("/org/freedesktop/GeoClue2/Client/{}/Location/0", client_state.client_id)))
+            } else {
+                Ok(Path::from("/"))
+            }
+        });
+        b.property("DistanceThreshold")
+            .get(|_ctx, client_state: &mut ClientState| Ok(client_state.distance_threshold.clone()))
+            .set(|_ctx, client_state, new_value| {
+                client_state.distance_threshold = new_value.clone();
+                Ok(Some(new_value))
+            });
+        b.property("TimeThreshold")
+            .get(|_ctx, client_state: &mut ClientState| Ok(client_state.time_threshold.clone()))
+            .set(|_ctx, client_state, new_value| {
+                client_state.time_threshold = new_value.clone();
+                Ok(Some(new_value))
+            });
+        b.property("DesktopId")
+            .get(|_ctx, client_state: &mut ClientState| Ok(client_state.desktop_id.clone()))
+            .set(|_ctx, client_state, new_value| {
+                client_state.desktop_id = new_value.clone();
+                Ok(Some(new_value))
+            });
+        b.property("RequestedAccuracyLevel")
+            .get(|_ctx, client_state: &mut ClientState| Ok(client_state.requested_accuracy_level.clone()))
+            .set(|_ctx, client_state, new_value| {
+                client_state.requested_accuracy_level = new_value.clone();
+                Ok(Some(new_value))
+            });
+        b.property("Active").get(|_ctx, client_state: &mut ClientState| Ok(client_state.active.clone()));
+
+        b.signal::<(Path,  Path), _>("LocationUpdated", ("old", "new"));
+        b.method_with_cr("Start", (), (), |ctx: &mut Context, cr: &mut Crossroads, _: ()| {
+            let _sender = ctx.message().sender().ok_or_else(|| MethodErr::failed("Unknown Sender"))?;
+            let client_state: &mut ClientState = cr.data_mut(ctx.path()).ok_or_else(|| MethodErr::no_path(ctx.path()))?;
+            let client_id = client_state.client_id;
+            println!("Start called by Client {}", client_id);
+
+            let location_path = format!("/org/freedesktop/GeoClue2/Client/{}/Location/0", client_id);
+            client_state.active = true;
+            let location_token = create_location(cr);
+            cr.insert(location_path.clone(), &[location_token], ());
+
+            let location_path = Path::from(format!("/org/freedesktop/GeoClue2/Client/{}/Location/0", client_id));
+            let sig = ctx.make_signal("LocationUpdated", (Path::from("/"), location_path));
+            ctx.push_msg(sig);
+            Ok(())
+        });
+        b.method_with_cr("Stop", (), (), |ctx: &mut Context, cr: &mut Crossroads, _: ()| {
+            let _sender = ctx.message().sender().ok_or_else(|| MethodErr::failed("Unknown Sender"))?;
+            let client_state: &mut ClientState = cr.data_mut(ctx.path()).ok_or_else(|| MethodErr::no_path(ctx.path()))?;
+            println!("Stop called by Client {}", client_state.client_id);
+            client_state.active = false;
+            Ok(())
+        });
+    })
 }
 
 fn main() -> Result<(), Error> {
@@ -202,34 +189,35 @@ fn main() -> Result<(), Error> {
         *LOCATION_DATA.lock().unwrap() = toml::from_str(file_contents.as_str())?;
         println!("Loaded config file");
     }
-    let mut c = Connection::get_private(dbus::BusType::System)?;
 
-    let f = tree::Factory::new_fnmut::<(TData)>();
-    let mut t = f.tree(()).add(f.object_path("/org/freedesktop/GeoClue2/Manager", None).introspectable().add(
-        f.interface("org.freedesktop.GeoClue2.Manager", ())
-            .add_m(f.method("GetClient", (), |m| {
-                // add_client(&mut CLIENTS.lock().unwrap(), &mut t, &mut c); TODO
-                Ok(vec!(m.msg.method_return().append(dbus::Path::new("/org/freedesktop/GeoClue2/Client/0").unwrap())))
-            }).outarg::<dbus::Path, _>("client"))
-            .add_m(f.method("CreateClient", (), |m| {
-                Ok(vec!(m.msg.method_return().append(dbus::Path::new("/org/freedesktop/GeoClue2/Client/0").unwrap())))
-            }).outarg::<dbus::Path, _>("client"))
-        )
-    );
+    let c  = if cfg!(debug_assertions) {
+        Connection::new_session().expect("Could not acquire Session D-Bus Connection for debugging")
+    } else {
+        Connection::new_system().expect("Could not acquire System D-Bus Connection")
+    };
+    c.request_name("org.freedesktop.GeoClue2", true, true, true).expect("Requesting name org.freedesktop.GeoClue2 failed");
 
-    c.register_name("org.freedesktop.GeoClue2", dbus::NameFlag::ReplaceExisting as u32)?;
-    t.set_registered(&c, true)?;
+    let mut cr = Crossroads::new();
 
-    add_client(&mut CLIENTS.lock().unwrap(), &mut t, &mut c);
-    loop {
-        for msg in c.incoming(1_000_000) {
-            if let Some(reponses) = t.handle(&msg) {
-                for resp in reponses {
-                    if c.send(resp).is_err() {
-                        println!("Dbus send error");
-                    }
-                }
-            }
-        }
-    }
+    let manager_token = cr.register("org.freedesktop.GeoClue2.Manager", |b| {
+        b.method_with_cr("GetClient", (), ("ClientID",), |ctx: &mut Context, cr: &mut Crossroads, _: ()| {
+            let sender = ctx.message().sender().ok_or_else(|| MethodErr::failed("Unknown Sender"))?;
+            let manager_state: &mut ManagerState = cr.data_mut(ctx.path()).ok_or_else(|| MethodErr::no_path(ctx.path()))?;
+            println!("Client ID requested by {}", &sender);
+
+            let this_id = manager_state.next_id;
+            manager_state.next_id = manager_state.next_id.checked_add(1).expect("Overflowed an u32 requesting client ids. Congratulations, you've earned this crash!");
+            let client_path = format!("/org/freedesktop/GeoClue2/Client/{}", this_id);
+
+            let client_token = create_client_token(cr);
+            cr.insert(client_path.clone(), &[client_token], ClientState { client_id: this_id, sender: sender.to_string(), ..ClientState::default() });
+
+            Ok((Path::from(client_path),))
+        });
+    });
+
+    cr.insert("/org/freedesktop/GeoClue2/Manager", &[manager_token], ManagerState { next_id: 0 });
+    cr.serve(&c).expect("dbus serve failed");
+    unreachable!()
+
 }
